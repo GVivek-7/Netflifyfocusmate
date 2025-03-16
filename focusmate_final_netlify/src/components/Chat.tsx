@@ -199,22 +199,8 @@ const Chat: React.FC<ChatProps> = ({ roomId, onClose }) => {
   const [messages, setMessages] = useState<Message[]>([]);
   const [newMessage, setNewMessage] = useState('');
   const [isMinimized, setIsMinimized] = useState(false);
-  const [currentUser, setCurrentUser] = useState<string | null>(null);
+  const [currentUserId, setCurrentUserId] = useState<string | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    // Get the current user
-    const fetchUser = async () => {
-      const { data, error } = await supabase.auth.getUser();
-      if (error) {
-        console.error("Error fetching user:", error);
-      } else {
-        setCurrentUser(data.user?.id || null);
-      }
-    };
-
-    fetchUser();
-  }, []);
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -225,6 +211,33 @@ const Chat: React.FC<ChatProps> = ({ roomId, onClose }) => {
   }, [messages]);
 
   useEffect(() => {
+    const fetchCurrentUser = async () => {
+      const { data: { user } } = await supabase.auth.getUser();
+      if (user) {
+        setCurrentUserId(user.id);
+      }
+    };
+
+    const fetchMessages = async () => {
+      const { data, error } = await supabase
+        .from('messages')
+        .select('*')
+        .eq('room_id', roomId)
+        .order('timestamp', { ascending: true });
+
+      if (error) {
+        console.error('Error fetching messages:', error);
+        return;
+      }
+
+      if (data) {
+        setMessages(data);
+      }
+    };
+
+    fetchCurrentUser();
+    fetchMessages();
+
     // Subscribe to new messages
     const channel = supabase
       .channel(`room:${roomId}`)
@@ -238,72 +251,51 @@ const Chat: React.FC<ChatProps> = ({ roomId, onClose }) => {
         },
         (payload) => {
           const newMessage = payload.new as Message;
-          setMessages((prev) => [...prev, newMessage]);
+          setMessages((prevMessages) => [...prevMessages, newMessage]);
         }
       )
       .subscribe();
 
-    // Fetch existing messages
-    const fetchMessages = async () => {
-      const { data, error } = await supabase
-        .from('messages')
-        .select('*')
-        .eq('room_id', roomId)
-        .order('timestamp', { ascending: true });
-
-      if (error) {
-        console.error('Error fetching messages:', error);
-        return;
-      }
-
-      // Ensure timestamp is in the correct format
-      const formattedMessages = data.map((msg) => ({
-        ...msg,
-        timestamp: new Date(msg.timestamp).toISOString(), // Ensure valid Date format
-      }));
-
-      setMessages(formattedMessages || []);
-    };
-
-    fetchMessages();
-
     return () => {
-      supabase.removeChannel(channel);
+      channel.unsubscribe();
     };
   }, [roomId]);
 
   const sendMessage = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!newMessage.trim()) return;
+    if (!newMessage.trim() || !currentUserId) return;
 
-    if (!currentUser) {
-      console.error("User not authenticated.");
-      return;
-    }
+    try {
+      const { error } = await supabase
+        .from('messages')
+        .insert([
+          {
+            content: newMessage.trim(),
+            room_id: roomId,
+            sender: currentUserId
+          }
+        ]);
 
-    const message = {
-      content: newMessage,
-      room_id: roomId,
-      sender: currentUser,
-      timestamp: new Date().toISOString(), // Ensure correct timestamp format
-    };
-
-    const { error } = await supabase.from('messages').insert([message]);
-
-    if (error) {
+      if (error) throw error;
+      setNewMessage('');
+    } catch (error) {
       console.error('Error sending message:', error);
-      return;
     }
-
-    setNewMessage('');
   };
 
   const toggleMinimize = () => {
     setIsMinimized(!isMinimized);
   };
 
+  const formatTimestamp = (timestamp: string) => {
+    return new Date(timestamp).toLocaleTimeString([], {
+      hour: '2-digit',
+      minute: '2-digit'
+    });
+  };
+
   return (
-    <div
+    <div 
       className={`fixed bottom-4 right-4 bg-white rounded-lg shadow-xl flex flex-col transition-all duration-300 ${
         isMinimized ? 'h-14 w-64' : 'w-96 h-[500px]'
       }`}
@@ -336,27 +328,33 @@ const Chat: React.FC<ChatProps> = ({ roomId, onClose }) => {
       {!isMinimized && (
         <>
           <div className="flex-1 overflow-y-auto p-4 space-y-4">
-            {messages.map((message) => (
-              <div
-                key={message.id}
-                className={`flex flex-col ${
-                  message.sender === currentUser ? 'items-end' : 'items-start'
-                }`}
-              >
+            {messages.length === 0 ? (
+              <div className="text-center text-gray-500">
+                No messages yet. Start the conversation!
+              </div>
+            ) : (
+              messages.map((message) => (
                 <div
-                  className={`max-w-[70%] rounded-lg p-3 ${
-                    message.sender === currentUser
-                      ? 'bg-indigo-600 text-white'
-                      : 'bg-gray-100 text-gray-900'
+                  key={message.id}
+                  className={`flex flex-col ${
+                    message.sender === currentUserId ? 'items-end' : 'items-start'
                   }`}
                 >
-                  <p className="text-sm">{message.content}</p>
+                  <div
+                    className={`max-w-[70%] rounded-lg p-3 ${
+                      message.sender === currentUserId
+                        ? 'bg-indigo-600 text-white'
+                        : 'bg-gray-100 text-gray-900'
+                    }`}
+                  >
+                    <p className="text-sm break-words">{message.content}</p>
+                  </div>
+                  <span className="text-xs text-gray-500 mt-1">
+                    {formatTimestamp(message.timestamp)}
+                  </span>
                 </div>
-                <span className="text-xs text-gray-500 mt-1">
-                  {new Date(message.timestamp).toLocaleTimeString()}
-                </span>
-              </div>
-            ))}
+              ))
+            )}
             <div ref={messagesEndRef} />
           </div>
 
@@ -371,7 +369,8 @@ const Chat: React.FC<ChatProps> = ({ roomId, onClose }) => {
               />
               <button
                 type="submit"
-                className="bg-indigo-600 text-white rounded-lg px-4 py-2 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                disabled={!newMessage.trim()}
+                className="bg-indigo-600 text-white rounded-lg px-4 py-2 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 <Send className="h-5 w-5" />
               </button>
